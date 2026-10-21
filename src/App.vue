@@ -17,6 +17,18 @@ interface SaveImageResult {
   error?: string
 }
 
+interface BrowserUrlResult {
+  ok: boolean
+  url?: string
+  browser?: string
+  error?: string
+}
+
+interface PreloadServices {
+  readBrowserUrl(): Promise<BrowserUrlResult>
+  readClipboardUrl(): string
+}
+
 interface BrowserRunner {
   goto(url: string): BrowserRunner
   viewport(width: number, height: number): BrowserRunner
@@ -66,6 +78,7 @@ interface CapturedFrame {
 }
 
 const ztoolsApi = window.ztools as unknown as ZToolsRuntime
+const preloadServices = window.services as unknown as PreloadServices
 
 const settingsOpen = ref(false)
 const currentImage = ref('')
@@ -118,6 +131,17 @@ function cleanLongShotErrorMessage(message: string) {
     return '当前前台窗口不是受支持的浏览器，请先切换到浏览器窗口再执行长截图'
   }
   return message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, '')
+}
+
+function isHttpUrl(url: string) {
+  return /^https?:\/\//i.test(url.trim())
+}
+
+function getLongShotCopyHint() {
+  const platform = navigator.platform.toLowerCase()
+  if (platform.includes('win')) return '复制网页链接（Ctrl+C）'
+  if (platform.includes('mac')) return '复制网页链接（Cmd+C）'
+  return '复制链接'
 }
 
 function resetTextResults() {
@@ -420,6 +444,60 @@ async function runBrowser(builder: BrowserRunner, browserId?: number) {
   return browserId === undefined ? builder.run({ show: true }) : builder.run(browserId)
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+const DOM_READY_ERROR = 'did not executed'
+
+function isDomReadyError(error: unknown): boolean {
+  if (error instanceof Error) return error.message.includes(DOM_READY_ERROR)
+  if (typeof error === 'string') return error.includes(DOM_READY_ERROR)
+  if (error && typeof error === 'object') {
+    const message = (error as Record<string, unknown>).message
+    return typeof message === 'string' && message.includes(DOM_READY_ERROR)
+  }
+
+  return false
+}
+
+async function withDomReadyRetry<T>(task: () => Promise<T>, attempts = 12, delayMs = 250): Promise<T> {
+  if (attempts < 1) throw new Error('withDomReadyRetry requires at least one attempt')
+
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await task()
+    } catch (error) {
+      if (!isDomReadyError(error)) throw error
+      lastError = error
+      if (attempt < attempts) await sleep(delayMs)
+    }
+  }
+
+  throw lastError
+}
+
+async function waitForDomReady(browserId: number | undefined, timeoutMs = 15000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+
+  for (;;) {
+    try {
+      const readyState = await runBrowser(
+        ztoolsApi.ubrowser.evaluate(() => document.readyState),
+        browserId,
+      )
+      if (readyState === 'complete' || readyState === 'interactive') return
+    } catch (error) {
+      if (!isDomReadyError(error)) throw error
+    }
+
+    if (Date.now() >= deadline) throw new Error('页面加载超时，未能进入可截图状态')
+    await sleep(250)
+  }
+}
+
 function normalizeMetrics(value: unknown): ScrollMetrics {
   const candidates = Array.isArray(value) ? value : [value]
   for (const candidate of candidates) {
@@ -444,7 +522,7 @@ function normalizeMetrics(value: unknown): ScrollMetrics {
 }
 
 async function readScrollMetrics(browserId?: number): Promise<ScrollMetrics> {
-  const result = await runBrowser(
+  const result = await withDomReadyRetry(() => runBrowser(
     ztoolsApi.ubrowser.evaluate(() => ({
       scrollY: window.scrollY || document.documentElement.scrollTop || 0,
       innerHeight: window.innerHeight,
@@ -454,7 +532,7 @@ async function readScrollMetrics(browserId?: number): Promise<ScrollMetrics> {
       ),
     })),
     browserId,
-  )
+  ))
   return normalizeMetrics(result)
 }
 
@@ -464,7 +542,7 @@ function createTempFramePath(index: number) {
 }
 
 async function captureFrame(path: string, browserId?: number) {
-  await runBrowser(ztoolsApi.ubrowser.screenshot(null, path), browserId)
+  await withDomReadyRetry(() => runBrowser(ztoolsApi.ubrowser.screenshot(null, path), browserId))
 }
 
 function updateLongShotProgress(captured: number) {
@@ -556,18 +634,53 @@ async function startLongScreenshot() {
   let browserId: number | undefined
 
   try {
-    const url = await ztoolsApi.readCurrentBrowserUrl()
-    if (!url) throw new Error('未读取到当前浏览器地址')
+    let url = ''
+
+    try {
+      const currentUrl = await ztoolsApi.readCurrentBrowserUrl()
+      if (typeof currentUrl === 'string' && isHttpUrl(currentUrl)) url = currentUrl.trim()
+    } catch {}
+
+    if (!url) {
+      longShotProgress.value = '正在读取运行中的浏览器标签页…'
+      try {
+        const browserUrl = await preloadServices.readBrowserUrl()
+        if (browserUrl.ok && browserUrl.url && isHttpUrl(browserUrl.url)) {
+          url = browserUrl.url.trim()
+          const message = `正在使用 ${browserUrl.browser ?? '浏览器'} 当前标签页`
+          longShotProgress.value = message
+          setStatus(message, 'info')
+          toast(message, 'info')
+        }
+      } catch {}
+    }
+
+    if (!url) {
+      try {
+        const clipboardUrl = preloadServices.readClipboardUrl()
+        if (clipboardUrl && isHttpUrl(clipboardUrl)) {
+          url = clipboardUrl.trim()
+          setStatus('已使用剪贴板中的链接', 'info')
+          toast('已使用剪贴板中的链接', 'info')
+        }
+      } catch {}
+    }
+
+    if (!url) throw new Error(`未获取到网页地址。请在浏览器中打开目标页面后重试，或先${getLongShotCopyHint()}再执行长截图。`)
 
     const viewport = getLongShotViewport()
     const opened = await runBrowser(
-      ztoolsApi.ubrowser.goto(url).viewport(viewport.width, viewport.height).scroll(0, 0).wait(300),
+      ztoolsApi.ubrowser.goto(url).viewport(viewport.width, viewport.height),
     )
     browserId = normalizeBrowserId(opened)
     if (browserId === undefined) {
       const idleBrowser = ztoolsApi.getIdleUBrowsers().find((browser) => browser.url === url)
       browserId = idleBrowser?.id
     }
+
+    longShotProgress.value = '正在等待页面加载完成…'
+    await waitForDomReady(browserId)
+    await withDomReadyRetry(() => runBrowser(ztoolsApi.ubrowser.scroll(0, 0), browserId))
 
     let metrics = await readScrollMetrics(browserId)
     const frames: CapturedFrame[] = []
@@ -586,10 +699,10 @@ async function startLongScreenshot() {
         updateLongShotProgress(frames.length)
 
         const previousScrollY = metrics.scrollY
-        await runBrowser(
+        await withDomReadyRetry(() => runBrowser(
           ztoolsApi.ubrowser.scroll(0, previousScrollY + metrics.innerHeight).wait(150),
           browserId,
-        )
+        ))
         const nextMetrics = await readScrollMetrics(browserId)
         const actualDelta = nextMetrics.scrollY - previousScrollY
         if (actualDelta <= 0) {

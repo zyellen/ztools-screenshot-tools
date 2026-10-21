@@ -4,7 +4,7 @@
   "title": "截图工具箱",
   "description": "截图、OCR 文字识别、长截图与翻译工具",
   "author": "zyellen",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "main": "dist/index.html",
   "preload": "preload/services.js",
   "logo": "logo.png",

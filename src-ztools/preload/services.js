@@ -1,9 +1,51 @@
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { execFile } = require('node:child_process')
+const { execFile, execFileSync } = require('node:child_process')
 
 const dataUrlPattern = /^data:image\/([a-z0-9]+);base64,/i
+const httpUrlPattern = /^https?:\/\//i
+
+const browserUrlTargets = [
+  { browser: 'Google Chrome', tab: 'active tab' },
+  { browser: 'Safari', tab: 'current tab' },
+  { browser: 'Microsoft Edge', tab: 'active tab' },
+  { browser: 'Brave Browser', tab: 'active tab' },
+  { browser: 'Vivaldi', tab: 'active tab' },
+  { browser: 'Opera', tab: 'active tab' },
+]
+
+function getHttpUrl(value) {
+  const url = String(value ?? '').trim()
+  return httpUrlPattern.test(url) ? url : ''
+}
+
+function runOsascript(script) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      '/usr/bin/osascript',
+      ['-e', script],
+      { timeout: 3000, encoding: 'utf8' },
+      (error, stdout) => {
+        if (error) reject(error)
+        else resolve(String(stdout ?? '').trim())
+      },
+    )
+  })
+}
+
+function getBrowserUrlScript({ browser, tab }) {
+  return `
+if application "${browser}" is running then
+  tell application "${browser}"
+    try
+      return URL of ${tab} of front window
+    end try
+  end tell
+end if
+return ""
+`
+}
 
 const services = {
   // 读文件
@@ -119,6 +161,34 @@ const services = {
       }
       return { ok: false, error: error && error.message ? error.message : String(error) }
     }
+  },
+  async readBrowserUrl() {
+    if (process.platform !== 'darwin') return { ok: false, error: 'unsupported' }
+
+    for (const target of browserUrlTargets) {
+      try {
+        const url = getHttpUrl(await runOsascript(getBrowserUrlScript(target)))
+        if (url) return { ok: true, url, browser: target.browser }
+      } catch {}
+    }
+
+    return { ok: false, error: '未在运行中的浏览器里读到网页地址' }
+  },
+  readClipboardUrl() {
+    try {
+      const electron = require('electron')
+      const url = getHttpUrl(electron.clipboard?.readText?.())
+      if (url) return url
+    } catch {}
+
+    if (process.platform === 'darwin') {
+      try {
+        const url = getHttpUrl(execFileSync('/usr/bin/pbpaste', { encoding: 'utf8', timeout: 3000 }))
+        if (url) return url
+      } catch {}
+    }
+
+    return ''
   },
 }
 
