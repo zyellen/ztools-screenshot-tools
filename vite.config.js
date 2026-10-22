@@ -7,6 +7,7 @@ export default defineConfig({
   base: './',
   build: {
     outDir: 'src-ztools/dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: { input: { main: 'index.html', overlay: 'overlay.html', pin: 'pin.html', scrollctl: 'scrollctl.html' } }
   }
 })
