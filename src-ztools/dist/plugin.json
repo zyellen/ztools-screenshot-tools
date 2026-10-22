@@ -4,7 +4,7 @@
   "title": "截图工具箱",
   "description": "截图、OCR 文字识别、长截图与翻译工具",
   "author": "zyellen",
-  "version": "0.1.2",
+  "version": "0.5.3",
   "main": "dist/index.html",
   "preload": "preload/services.js",
   "logo": "logo.png",
@@ -18,7 +18,7 @@
   "features": [
     {
       "code": "screenshot",
-      "explain": "屏幕截图，支持 OCR 识别与翻译",
+      "explain": "框选截图，支持标注/OCR/翻译/滚动截图/悬浮贴图",
       "icon": "logo.png",
       "cmds": [
         "截图",
@@ -28,7 +28,7 @@
     },
     {
       "code": "long-shot",
-      "explain": "滚动捕获当前浏览器页面为长图",
+      "explain": "框选区域，手动或自动滚动拼接长图",
       "icon": "logo.png",
       "cmds": [
         "长截图",
